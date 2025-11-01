@@ -127,6 +127,9 @@ TXT2C ?=
 # Leave empty for OS auto-detection
 WIN32 ?= $(filter $(OS),Windows_NT)
 
+# Set USE_PIPEWIRE=1 to use PipeWire backend instead of ALSA (Linux only)
+USE_PIPEWIRE ?= 0
+
 # Determine build directory based on target platform
 ifneq ($(WIN32),)
 PLATFORM := windows
@@ -134,8 +137,18 @@ OBJS += $(OBJS_WIN)
 LDLIBS += -lwsock32 -lwinmm -lsetupapi -lws2_32 -lhid
 else
 PLATFORM := linux
+# Select audio backend for Linux
+ifneq ($(USE_PIPEWIRE),0)
+OBJS_LIN = \
+	$(BUILDDIR)/src/linux/PipeWire.o \
+	$(BUILDDIR)/src/linux/os_util.o
+LDLIBS += -lrt -lpipewire-0.3
+CPPFLAGS += -DUSE_PIPEWIRE=1 -I/usr/include/pipewire-0.3 -I/usr/include/spa-0.2
+else
 OBJS += $(OBJS_LIN)
 LDLIBS += -lrt -lasound
+endif
+OBJS += $(OBJS_LIN)
 endif
 
 # Build directory structure
