@@ -61,6 +61,11 @@ struct pw_stream *capture_stream = NULL;
 static bool playback_active = false;
 static bool capture_active = false;
 
+// Capture accumulation buffer - PipeWire callbacks are variable size
+// but ARDOP expects exactly ReceiveSize (240) samples at a time
+static short capture_accumulator[ReceiveSize];
+static int capture_accum_count = 0;
+
 // Playback queue for bridging SendtoCard() to on_playback_process()
 // ALSA uses blocking writes, PipeWire uses pull callbacks
 // Longest frame is <6 seconds, so buffer ~8 seconds for headroom
@@ -132,7 +137,7 @@ static void on_capture_process(void *userdata) {
 	struct spa_buffer *buf;
 	int16_t *src;
 	uint32_t n_frames;
-	uint32_t samples_to_copy;
+	uint32_t i, samples_available, samples_needed;
 
 	if ((b = pw_stream_dequeue_buffer(capture_stream)) == NULL) {
 		ZF_LOGW("PipeWire capture: out of buffers");
@@ -143,16 +148,40 @@ static void on_capture_process(void *userdata) {
 	src = buf->datas[0].data;
 	n_frames = buf->datas[0].chunk->size / BYTES_PER_SAMPLE;
 
-	// Copy samples to inbuffer[0] (ALSA only uses index 0, not 1)
-	// Limit to ReceiveSize to avoid buffer overflow
-	samples_to_copy = (n_frames < ReceiveSize) ? n_frames : ReceiveSize;
+	// PipeWire callbacks are variable size, but ARDOP expects exactly
+	// ReceiveSize (240) samples at a time. Accumulate samples until we
+	// have a full buffer, then process it (matching ALSA behavior).
 
-	if (samples_to_copy > 0) {
-		memcpy(&inbuffer[0][0], src, samples_to_copy * sizeof(int16_t));
+	samples_available = n_frames;
+	i = 0;
 
-		// If capturing, process the samples
-		if (Capturing) {
-			ProcessNewSamples(&inbuffer[0][0], samples_to_copy);
+	while (samples_available > 0) {
+		samples_needed = ReceiveSize - capture_accum_count;
+
+		if (samples_available >= samples_needed) {
+			// We have enough to fill the buffer
+			memcpy(&capture_accumulator[capture_accum_count], &src[i],
+			       samples_needed * sizeof(int16_t));
+			i += samples_needed;
+			samples_available -= samples_needed;
+
+			// Copy to inbuffer[0] and process (matching ALSA.c:1702-1716)
+			memcpy(&inbuffer[0][0], capture_accumulator, ReceiveSize * sizeof(int16_t));
+
+			if (Capturing) {
+				ProcessNewSamples(&inbuffer[0][0], ReceiveSize);
+			} else {
+				// Still preprocess even when not Capturing (for WAV recording, etc)
+				PreprocessNewSamples(&inbuffer[0][0], ReceiveSize);
+			}
+
+			capture_accum_count = 0;  // Reset for next batch
+		} else {
+			// Not enough samples yet, accumulate what we have
+			memcpy(&capture_accumulator[capture_accum_count], &src[i],
+			       samples_available * sizeof(int16_t));
+			capture_accum_count += samples_available;
+			samples_available = 0;
 		}
 	}
 
