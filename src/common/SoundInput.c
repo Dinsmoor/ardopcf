@@ -839,7 +839,45 @@ float dblFreqBin[8];
 
 // Add InputNoise if specified and write samples to RX Wav file if needed.
 // Return true if any samples that were clipped due to added noise, else false.
+// 3kHz Low-pass filter state (2nd order Butterworth IIR)
+// This prevents aliasing of high frequencies into the ARDOP signal band
+static float lpf_x1 = 0.0f, lpf_x2 = 0.0f;  // input history
+static float lpf_y1 = 0.0f, lpf_y2 = 0.0f;  // output history
+
+// 2nd order Butterworth low-pass filter coefficients for fc=3000Hz, fs=12000Hz
+// Designed using: Wc = 2*pi*fc/fs, Q = 0.7071
+// Transfer function: H(z) = (b0 + b1*z^-1 + b2*z^-2) / (1 + a1*z^-1 + a2*z^-2)
+#define LPF_B0  0.0674552738890719f
+#define LPF_B1  0.134910547778144f
+#define LPF_B2  0.0674552738890719f
+#define LPF_A1  -0.942809041582484f
+#define LPF_A2  0.213230437278821f
+
+// Apply 3kHz low-pass filter to samples (anti-aliasing)
+static void apply_lowpass_filter(short * Samples, int nSamples) {
+	float x, y;
+	for (int i = 0; i < nSamples; i++) {
+		x = (float)Samples[i];
+
+		// Direct Form II Transposed (more numerically stable)
+		y = LPF_B0 * x + lpf_x1;
+		lpf_x1 = LPF_B1 * x - LPF_A1 * y + lpf_x2;
+		lpf_x2 = LPF_B2 * x - LPF_A2 * y;
+
+		// Clamp to 16-bit range
+		if (y > 32767.0f)
+			y = 32767.0f;
+		else if (y < -32768.0f)
+			y = -32768.0f;
+
+		Samples[i] = (short)y;
+	}
+}
+
 bool PreprocessNewSamples(short * Samples, int nSamples) {
+	// Apply 3kHz anti-aliasing filter first (before noise and recording)
+	apply_lowpass_filter(Samples, nSamples);
+
 	bool clipped = (add_noise(Samples, nSamples, InputNoiseStdDev) > 0);
 	if (rxwf != NULL) {
 		// There is an open Wav file recording.
